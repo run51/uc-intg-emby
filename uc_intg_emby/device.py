@@ -216,10 +216,10 @@ class EmbyServer(PollingDevice):
             return False
         return await self._client.send_command(session_id, command, arguments)
 
-    async def play_items(self, session_id: str, item_ids: list[str]) -> bool:
+    async def play_items(self, session_id: str, item_ids: list[str], start_ticks: int = 0) -> bool:
         if not self._client:
             return False
-        return await self._client.play_items(session_id, item_ids, user_id=self.user_id)
+        return await self._client.play_items(session_id, item_ids, user_id=self.user_id, start_ticks=start_ticks)
 
     def build_image_url(self, item_id: str, max_height: int = 300) -> str:
         if not self._client:

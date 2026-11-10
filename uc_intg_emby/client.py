@@ -11,6 +11,8 @@ from uc_intg_emby.const import EMBY_API_TIMEOUT, EMBY_CONNECTION_TIMEOUT
 
 _LOG = logging.getLogger(__name__)
 
+SEARCH_ITEM_TYPES = "Movie,BoxSet,Series,Episode,MusicVideo,Video,MusicAlbum,MusicArtist,Audio,Playlist"
+
 
 class EmbyClient:
     """Emby Media Server REST API client."""
@@ -19,6 +21,7 @@ class EmbyClient:
         self._server_url = server_url.rstrip("/")
         self._api_key = api_key
         self._session: aiohttp.ClientSession | None = None
+        self._oppo_plugin = True  # Emby.Oppo plugin endpoints, until a call shows they are missing
 
     async def connect(self) -> None:
         if self._session and not self._session.closed:
@@ -99,7 +102,8 @@ class EmbyClient:
         return await self._post(f"/Sessions/{session_id}/Command", {"Name": command, "Arguments": arguments})
 
     async def play_items(
-        self, session_id: str, item_ids: list[str], start_index: int = 0, user_id: str = ""
+        self, session_id: str, item_ids: list[str], start_index: int = 0, user_id: str = "",
+        start_ticks: int = 0,
     ) -> bool:
         # Emby documents ItemIds and PlayCommand as required query parameters: send them there,
         # and keep them in the body as well for servers that read the body.
@@ -107,7 +111,11 @@ class EmbyClient:
         body: dict[str, Any] = {"ItemIds": item_ids, "StartIndex": start_index, "PlayCommand": "PlayNow"}
         if user_id:
             body["ControllingUserId"] = user_id
-        return await self._post(f"/Sessions/{session_id}/Playing?ItemIds={ids}&PlayCommand=PlayNow", body)
+        endpoint = f"/Sessions/{session_id}/Playing?ItemIds={ids}&PlayCommand=PlayNow"
+        if start_ticks > 0:
+            endpoint += f"&StartPositionTicks={start_ticks}"
+            body["StartPositionTicks"] = start_ticks
+        return await self._post(endpoint, body)
 
     async def get_libraries(self, user_id: str) -> list[dict[str, Any]]:
         result = await self._get(f"/Users/{user_id}/Views")
@@ -132,8 +140,40 @@ class EmbyClient:
             return result
         return {"Items": [], "TotalRecordCount": 0}
 
+    async def get_item(self, user_id: str, item_id: str) -> dict[str, Any] | None:
+        """One item with its summary, genres, streams, chapters and the user's resume position."""
+        result = await self._get(f"/Users/{user_id}/Items/{item_id}")
+        return result if isinstance(result, dict) else None
+
+    async def get_oppo_badges(self, item_ids: list[str]) -> list[dict[str, Any]] | None:
+        """Resolution, HDR and 3D of movies, from the Emby.Oppo plugin (None if it is not installed)."""
+        if not self._oppo_plugin or not item_ids:
+            return None
+        result = await self._get(f"/Oppo/Remote/Badges?Ids={quote(','.join(item_ids), safe=',')}")
+        if not isinstance(result, list):
+            self._oppo_plugin_missing()
+            return None
+        return result
+
+    async def get_oppo_chapters(self, item_id: str) -> list[dict[str, Any]] | None:
+        """Real Blu-ray chapter marks from the Emby.Oppo plugin (None if it is not installed)."""
+        if not self._oppo_plugin:
+            return None
+        result = await self._get(f"/Oppo/Remote/Chapters?Id={quote(item_id)}")
+        if not isinstance(result, list):
+            self._oppo_plugin_missing()
+            return None
+        return result
+
+    def _oppo_plugin_missing(self) -> None:
+        # Stop asking until the next connection: without the plugin every call would fail.
+        _LOG.info("Emby.Oppo plugin not available: no format badges or Blu-ray chapters")
+        self._oppo_plugin = False
+
     async def search_items(self, user_id: str, search_term: str, limit: int = 30) -> list[dict[str, Any]]:
-        endpoint = f"/Users/{user_id}/Items?SearchTerm={search_term}&Limit={limit}&Recursive=true"
+        endpoint = f"/Users/{user_id}/Items?SearchTerm={quote(search_term)}&Limit={limit}&Recursive=true"
+        # Only things that can be played or opened: no tags, keywords, genres or people.
+        endpoint += f"&IncludeItemTypes={SEARCH_ITEM_TYPES}"
         endpoint += "&Fields=PrimaryImageAspectRatio,ProductionYear&ImageTypeLimit=1"
         result = await self._get(endpoint)
         if isinstance(result, dict):
@@ -146,6 +186,13 @@ class EmbyClient:
 
     def image_url(self, item_id: str, max_height: int = 300) -> str:
         return f"{self._server_url}/Items/{item_id}/Images/Primary?maxHeight={max_height}&api_key={self._api_key}"
+
+    def chapter_image_url(self, item_id: str, index: int, tag: str = "", max_height: int = 300) -> str:
+        return (f"{self._server_url}/Items/{item_id}/Images/Chapter/{index}"
+                f"?maxHeight={max_height}&tag={tag}&api_key={self._api_key}")
+
+    def oppo_chapter_image_url(self, item_id: str, index: int) -> str:
+        return f"{self._server_url}/Oppo/Remote/ChapterImage?Id={quote(item_id)}&Index={index}"
 
     @property
     def server_url(self) -> str:

@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import textwrap
+from typing import TYPE_CHECKING, Any
 
 from ucapi import StatusCodes
 from ucapi.api_definitions import Pagination
@@ -44,13 +45,21 @@ BROWSABLE_TYPES = {"Series", "Season", "MusicAlbum", "MusicArtist", "Folder", "C
 # keyed by Emby CollectionType. A movie library then shows the movies, not the disk folders.
 FLAT_LIBRARY_ITEM_TYPES = {"movies": "Movie", "musicvideos": "MusicVideo,Video"}
 
+# Video items get an info line (runtime, resolution, HDR, 3D) and open a "title page" when browsed:
+# play, resume, summary, audio tracks and chapters. The Remote has no detail screen of its own.
+TITLE_PAGE_TYPES = {"Movie", "Episode", "MusicVideo", "Video"}
+TICKS_PER_SECOND = 10_000_000
+HDR_LABELS = {"DV": "Dolby Vision"}
+OVERVIEW_LINE_WIDTH = 60
+OVERVIEW_MAX_LINES = 14
+MAX_AUDIO_TRACKS = 3
+
 
 async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | StatusCodes:
     if not device.client or not device.user_id:
         return StatusCodes.SERVICE_UNAVAILABLE
 
     media_id = options.media_id if hasattr(options, "media_id") else None
-    media_type = options.media_type if hasattr(options, "media_type") else None
 
     if not media_id or media_id == "root":
         return await _browse_root(device)
@@ -62,6 +71,12 @@ async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | 
     if media_id.startswith("folder_"):
         folder_id = media_id[7:]
         return await _browse_folder(device, folder_id, options)
+
+    if media_id.startswith("item_"):
+        return await _browse_title_page(device, media_id[5:], options)
+
+    if media_id.startswith("chapters_"):
+        return await _browse_chapters(device, media_id[9:], options)
 
     return StatusCodes.NOT_FOUND
 
@@ -75,9 +90,10 @@ async def search(device: EmbyServer, options: SearchOptions) -> SearchResults | 
         return SearchResults(media=[], pagination=Pagination(page=1, limit=0, count=0))
 
     items = await device.client.search_items(device.user_id, query, limit=30)
+    badges = await _badges_for(device, items)
     results = []
     for item in items:
-        media_item = _item_to_browse_item(device, item)
+        media_item = _item_to_browse_item(device, item, badges.get(item.get("Id", "")))
         if media_item:
             results.append(media_item)
 
@@ -130,12 +146,17 @@ async def _browse_root(device: EmbyServer) -> BrowseResults:
     )
 
 
+def _paging(options: BrowseOptions) -> tuple[int, int]:
+    paging = getattr(options, "paging", None)
+    page = getattr(paging, "page", None) or 1
+    limit = getattr(paging, "limit", None) or 50
+    return page, limit
+
+
 async def _browse_library(
     device: EmbyServer, library_id: str, options: BrowseOptions, library_type: str = ""
 ) -> BrowseResults:
-    page = options.paging.page if hasattr(options, "paging") and options.paging and hasattr(options.paging, "page") and options.paging.page else 1
-    limit = options.paging.limit if hasattr(options, "paging") and options.paging and hasattr(options.paging, "limit") and options.paging.limit else 50
-
+    page, limit = _paging(options)
     start_index = (page - 1) * limit
     item_types = FLAT_LIBRARY_ITEM_TYPES.get(library_type, "")
     result = await device.client.get_items(
@@ -145,10 +166,11 @@ async def _browse_library(
 
     total = result.get("TotalRecordCount", 0)
     emby_items = result.get("Items", [])
+    badges = await _badges_for(device, emby_items)
 
     items = []
     for item in emby_items:
-        media_item = _item_to_browse_item(device, item)
+        media_item = _item_to_browse_item(device, item, badges.get(item.get("Id", "")))
         if media_item:
             items.append(media_item)
 
@@ -167,18 +189,17 @@ async def _browse_library(
 
 
 async def _browse_folder(device: EmbyServer, folder_id: str, options: BrowseOptions) -> BrowseResults:
-    page = options.paging.page if hasattr(options, "paging") and options.paging and hasattr(options.paging, "page") and options.paging.page else 1
-    limit = options.paging.limit if hasattr(options, "paging") and options.paging and hasattr(options.paging, "limit") and options.paging.limit else 50
-
+    page, limit = _paging(options)
     start_index = (page - 1) * limit
     result = await device.client.get_items(device.user_id, parent_id=folder_id, start_index=start_index, limit=limit)
 
     total = result.get("TotalRecordCount", 0)
     emby_items = result.get("Items", [])
+    badges = await _badges_for(device, emby_items)
 
     items = []
     for item in emby_items:
-        media_item = _item_to_browse_item(device, item)
+        media_item = _item_to_browse_item(device, item, badges.get(item.get("Id", "")))
         if media_item:
             items.append(media_item)
 
@@ -195,7 +216,187 @@ async def _browse_folder(device: EmbyServer, folder_id: str, options: BrowseOpti
     )
 
 
-def _item_to_browse_item(device: EmbyServer, item: dict) -> BrowseMediaItem | None:
+async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOptions) -> BrowseResults | StatusCodes:
+    """A movie's page: play, resume, info, summary, audio tracks and chapters, as list rows."""
+    item = await device.client.get_item(device.user_id, item_id)
+    if not item:
+        return StatusCodes.NOT_FOUND
+    badges = await _badges_for(device, [item])
+    badge = badges.get(item_id)
+    poster = device.build_image_url(item_id) if "Primary" in item.get("ImageTags", {}) else None
+
+    rows: list[BrowseMediaItem] = [
+        BrowseMediaItem(title="▶ Lecture", media_class=MediaClass.MOVIE, media_type="play",
+                        media_id=f"item_{item_id}", can_play=True, thumbnail=poster),
+    ]
+    position = (item.get("UserData") or {}).get("PlaybackPositionTicks") or 0
+    if position > 0:
+        rows.append(BrowseMediaItem(
+            title=f"⏯ Reprendre à {_fmt_duration(position // TICKS_PER_SECOND)}",
+            media_class=MediaClass.MOVIE, media_type="resume",
+            media_id=f"resume_{item_id}_{position}", can_play=True, thumbnail=poster,
+        ))
+
+    details = [part for part in (
+        _info_line(item, badge),
+        ", ".join(item.get("Genres") or [])[:200],
+        f"★ {item['CommunityRating']:.1f}" if item.get("CommunityRating") else "",
+    ) if part]
+    if details:
+        rows.append(_text_row(item_id, "info", " · ".join(details)))
+
+    overview = (item.get("Overview") or "").strip()
+    lines = textwrap.wrap(overview, OVERVIEW_LINE_WIDTH)
+    if len(lines) > OVERVIEW_MAX_LINES:
+        lines = lines[:OVERVIEW_MAX_LINES]
+        lines[-1] = lines[-1].rstrip(" .,;") + "…"
+    for index, line in enumerate(lines):
+        rows.append(_text_row(item_id, f"txt{index}", line))
+
+    audio = [s.get("DisplayTitle") for s in item.get("MediaStreams") or [] if s.get("Type") == "Audio" and s.get("DisplayTitle")]
+    if audio:
+        more = f" (+{len(audio) - MAX_AUDIO_TRACKS})" if len(audio) > MAX_AUDIO_TRACKS else ""
+        rows.append(_text_row(item_id, "audio", "Audio : " + ", ".join(audio[:MAX_AUDIO_TRACKS]) + more))
+
+    chapters = await _chapters_for(device, item_id, item)
+    if chapters:
+        rows.append(BrowseMediaItem(
+            title=f"Chapitres ({len(chapters)})", media_class=MediaClass.DIRECTORY, media_type="chapters",
+            media_id=f"chapters_{item_id}", can_browse=True, thumbnail=chapters[min(1, len(chapters) - 1)][2] or poster,
+        ))
+
+    title = _title_for(item)
+    return _paged_container(
+        BrowseMediaItem(
+            title=title, subtitle=_info_line(item, badge) or None,
+            media_class=EMBY_TYPE_TO_MEDIA_CLASS.get(item.get("Type", ""), MediaClass.VIDEO),
+            media_type=item.get("Type", "video").lower(), media_id=f"item_{item_id}",
+            can_browse=True, can_play=True, thumbnail=poster,
+            duration=_duration_seconds(item),
+        ),
+        rows, options,
+    )
+
+
+async def _browse_chapters(device: EmbyServer, item_id: str, options: BrowseOptions) -> BrowseResults | StatusCodes:
+    chapters = await _chapters_for(device, item_id)
+    if not chapters:
+        return StatusCodes.NOT_FOUND
+    rows = [
+        BrowseMediaItem(
+            title=f"{index + 1} · {_fmt_clock(seconds)}" + (f" · {name}" if name else ""),
+            media_class=MediaClass.VIDEO, media_type="chapter",
+            media_id=f"chapter_{item_id}_{int(seconds * TICKS_PER_SECOND)}",
+            can_play=True, thumbnail=image or None,
+        )
+        for index, (seconds, name, image) in enumerate(chapters)
+    ]
+    return _paged_container(
+        BrowseMediaItem(title="Chapitres", media_class=MediaClass.DIRECTORY, media_type="chapters",
+                        media_id=f"chapters_{item_id}", can_browse=True),
+        rows, options,
+    )
+
+
+async def _chapters_for(device: EmbyServer, item_id: str, item: dict | None = None) -> list[tuple[float, str, str]]:
+    """Chapters as (start seconds, name, image URL). Prefers the OPPO plugin's real Blu-ray marks."""
+    chapters = await device.client.get_oppo_chapters(item_id)
+    if chapters:
+        return [
+            (float(c.get("Seconds") or 0), _chapter_name(c.get("Name")),
+             device.client.oppo_chapter_image_url(item_id, c.get("Index", i)))
+            for i, c in enumerate(chapters)
+        ]
+    if item is None:
+        item = await device.client.get_item(device.user_id, item_id) or {}
+    return [
+        ((c.get("StartPositionTicks") or 0) / TICKS_PER_SECOND, _chapter_name(c.get("Name")),
+         device.client.chapter_image_url(item_id, i, c.get("ImageTag")) if c.get("ImageTag") else "")
+        for i, c in enumerate(item.get("Chapters") or [])
+    ]
+
+
+def _chapter_name(name: str | None) -> str:
+    """Chapter name, or "" for generic ones ("Chapitre 4", "Chapter 04") that only repeat the number."""
+    name = (name or "").strip()
+    words = name.split()
+    if len(words) == 2 and words[1].isdigit() and words[0].lower() in {"chapitre", "chapter", "kapitel", "capitolo", "capítulo"}:
+        return ""
+    return name[:200]
+
+
+def _paged_container(container: BrowseMediaItem, rows: list[BrowseMediaItem], options: BrowseOptions) -> BrowseResults:
+    page, limit = _paging(options)
+    start = (page - 1) * limit
+    container.items = rows[start:start + limit]
+    return BrowseResults(media=container, pagination=Pagination(page=page, limit=limit, count=len(rows)))
+
+
+def _text_row(item_id: str, key: str, text: str) -> BrowseMediaItem:
+    """A plain text line of a title page (not playable, not browsable)."""
+    return BrowseMediaItem(title=text[:255], media_type="text", media_id=f"text_{item_id}_{key}")
+
+
+async def _badges_for(device: EmbyServer, emby_items: list[dict]) -> dict[str, dict]:
+    """Resolution, HDR and 3D per item id from the OPPO plugin, when it is installed."""
+    ids = [i.get("Id") for i in emby_items if i.get("Id") and i.get("Type") in TITLE_PAGE_TYPES]
+    if not ids:
+        return {}
+    badges = await device.client.get_oppo_badges(ids) or []
+    return {b.get("Id"): b for b in badges if isinstance(b, dict) and b.get("Id")}
+
+
+def _duration_seconds(item: dict) -> int | None:
+    ticks = item.get("RunTimeTicks") or 0
+    return int(ticks // TICKS_PER_SECOND) if ticks else None
+
+
+def _info_line(item: dict, badge: dict | None) -> str:
+    """Runtime, resolution, HDR and 3D, e.g. "2 h 50 · 4K · Dolby Vision"."""
+    parts = []
+    seconds = _duration_seconds(item)
+    if seconds:
+        parts.append(_fmt_duration(seconds))
+    if badge:
+        if badge.get("Resolution"):
+            parts.append(badge["Resolution"])
+        hdr = badge.get("Hdr") or ""
+        if hdr:
+            parts.append(HDR_LABELS.get(hdr, hdr))
+        if badge.get("Is3D"):
+            parts.append("3D")
+    return " · ".join(parts)
+
+
+def _fmt_duration(seconds: int) -> str:
+    hours, minutes = divmod(int(seconds) // 60, 60)
+    return f"{hours} h {minutes:02d}" if hours else f"{minutes} min"
+
+
+def _fmt_clock(seconds: float) -> str:
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _title_for(item: dict) -> str:
+    item_name = item.get("Name", "")
+    item_type = item.get("Type", "")
+    if item_type == "Episode":
+        series = item.get("SeriesName", "")
+        season_num = item.get("ParentIndexNumber")
+        episode_num = item.get("IndexNumber")
+        if series and season_num is not None and episode_num is not None:
+            return f"{series} - S{season_num:02d}E{episode_num:02d} - {item_name}"
+    elif item_type == "Movie":
+        year = item.get("ProductionYear")
+        if year:
+            return f"{item_name} ({year})"
+    return item_name
+
+
+def _item_to_browse_item(device: EmbyServer, item: dict, badge: dict | None = None) -> BrowseMediaItem | None:
     item_id = item.get("Id", "")
     item_name = item.get("Name", "")
     item_type = item.get("Type", "")
@@ -209,6 +410,8 @@ def _item_to_browse_item(device: EmbyServer, item: dict) -> BrowseMediaItem | No
 
     if is_playable:
         media_id = f"item_{item_id}"
+        # Videos also open their title page (summary, resume, chapters).
+        is_browsable = item_type in TITLE_PAGE_TYPES
     elif is_browsable:
         media_id = f"folder_{item_id}"
     else:
@@ -219,24 +422,16 @@ def _item_to_browse_item(device: EmbyServer, item: dict) -> BrowseMediaItem | No
     if "Primary" in item.get("ImageTags", {}):
         thumbnail = device.build_image_url(item_id)
 
-    title = item_name
-    if item_type == "Episode":
-        series = item.get("SeriesName", "")
-        season_num = item.get("ParentIndexNumber")
-        episode_num = item.get("IndexNumber")
-        if series and season_num is not None and episode_num is not None:
-            title = f"{series} - S{season_num:02d}E{episode_num:02d} - {item_name}"
-    elif item_type == "Movie":
-        year = item.get("ProductionYear")
-        if year:
-            title = f"{item_name} ({year})"
+    subtitle = _info_line(item, badge) if item_type in TITLE_PAGE_TYPES else ""
 
     return BrowseMediaItem(
-        title=title,
+        title=_title_for(item),
+        subtitle=subtitle or None,
         media_class=media_class,
         media_type=item_type.lower(),
         media_id=media_id,
         can_browse=is_browsable,
         can_play=is_playable,
         thumbnail=thumbnail or None,
+        duration=_duration_seconds(item) if item_type in TITLE_PAGE_TYPES else None,
     )

@@ -284,5 +284,12 @@ class EmbyMediaPlayer(MediaPlayerEntity):
         if media_id.startswith("item_"):
             item_id = media_id[5:]
             return await self._device.play_items(session_id, [item_id])
+        # Title page rows: "resume_<id>_<ticks>" and "chapter_<id>_<ticks>" start at a position.
+        if media_id.startswith(("resume_", "chapter_")):
+            item_id, _, ticks = media_id.split("_", 1)[1].rpartition("_")
+            if item_id and ticks.isdigit():
+                return await self._device.play_items(session_id, [item_id], start_ticks=int(ticks))
+        if media_id.startswith("text_"):
+            return True  # a summary line of a title page: nothing to play
         _LOG.warning("[%s] Unknown media_id format: %s", self.id, media_id)
         return False
