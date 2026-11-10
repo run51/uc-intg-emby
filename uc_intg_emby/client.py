@@ -140,6 +140,22 @@ class EmbyClient:
             return result
         return {"Items": [], "TotalRecordCount": 0}
 
+    async def get_resume_items(self, user_id: str, start_index: int = 0, limit: int = 50) -> dict[str, Any]:
+        """Videos started and not finished, most recent first (Emby's "Continue watching")."""
+        result = await self._get(
+            f"/Users/{user_id}/Items/Resume?StartIndex={start_index}&Limit={limit}&MediaTypes=Video"
+            "&Fields=PrimaryImageAspectRatio,ProductionYear&ImageTypeLimit=1"
+        )
+        return result if isinstance(result, dict) else {"Items": [], "TotalRecordCount": 0}
+
+    async def get_favorite_items(self, user_id: str, start_index: int = 0, limit: int = 50) -> dict[str, Any]:
+        result = await self._get(
+            f"/Users/{user_id}/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=Movie,MusicVideo,BoxSet"
+            f"&SortBy=SortName&SortOrder=Ascending&StartIndex={start_index}&Limit={limit}"
+            "&Fields=PrimaryImageAspectRatio,ProductionYear&ImageTypeLimit=1"
+        )
+        return result if isinstance(result, dict) else {"Items": [], "TotalRecordCount": 0}
+
     async def get_item(self, user_id: str, item_id: str) -> dict[str, Any] | None:
         """One item with its summary, genres, streams, chapters and the user's resume position."""
         result = await self._get(f"/Users/{user_id}/Items/{item_id}")

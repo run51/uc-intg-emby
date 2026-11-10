@@ -51,8 +51,12 @@ TITLE_PAGE_TYPES = {"Movie", "Episode", "MusicVideo", "Video"}
 TICKS_PER_SECOND = 10_000_000
 HDR_LABELS = {"DV": "Dolby Vision"}
 OVERVIEW_LINE_WIDTH = 60
-OVERVIEW_MAX_LINES = 14
+OVERVIEW_MAX_LINES = 20
 MAX_AUDIO_TRACKS = 3
+
+# Shortcuts shown above the libraries when they are not empty, like the Emby home screen.
+CONTINUE_ID = "continue"
+FAVORITES_ID = "favorites"
 
 
 async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | StatusCodes:
@@ -77,6 +81,12 @@ async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | 
 
     if media_id.startswith("chapters_"):
         return await _browse_chapters(device, media_id[9:], options)
+
+    if media_id.startswith("summary_"):
+        return await _browse_summary(device, media_id[8:], options)
+
+    if media_id in (CONTINUE_ID, FAVORITES_ID):
+        return await _browse_shortcut(device, media_id, options)
 
     return StatusCodes.NOT_FOUND
 
@@ -107,6 +117,23 @@ async def _browse_root(device: EmbyServer) -> BrowseResults:
     libraries = await device.client.get_libraries(device.user_id)
 
     items = []
+    resume = await device.client.get_resume_items(device.user_id, limit=1)
+    if resume.get("TotalRecordCount"):
+        first = (resume.get("Items") or [{}])[0]
+        items.append(BrowseMediaItem(
+            title="Reprendre", media_class=MediaClass.DIRECTORY, media_type="continue",
+            media_id=CONTINUE_ID, can_browse=True,
+            thumbnail=device.build_image_url(first["Id"]) if first.get("Id") else None,
+        ))
+    favorites = await device.client.get_favorite_items(device.user_id, limit=1)
+    if favorites.get("TotalRecordCount"):
+        first = (favorites.get("Items") or [{}])[0]
+        items.append(BrowseMediaItem(
+            title="Favoris", media_class=MediaClass.DIRECTORY, media_type="favorites",
+            media_id=FAVORITES_ID, can_browse=True,
+            thumbnail=device.build_image_url(first["Id"]) if first.get("Id") else None,
+        ))
+
     for lib in libraries:
         lib_id = lib.get("Id", "")
         lib_name = lib.get("Name", "Unknown")
@@ -216,6 +243,37 @@ async def _browse_folder(device: EmbyServer, folder_id: str, options: BrowseOpti
     )
 
 
+async def _browse_shortcut(device: EmbyServer, shortcut: str, options: BrowseOptions) -> BrowseResults:
+    """"Reprendre" (started videos, most recent first) or "Favoris"."""
+    page, limit = _paging(options)
+    start_index = (page - 1) * limit
+    if shortcut == CONTINUE_ID:
+        result = await device.client.get_resume_items(device.user_id, start_index, limit)
+        title = "Reprendre"
+    else:
+        result = await device.client.get_favorite_items(device.user_id, start_index, limit)
+        title = "Favoris"
+    emby_items = result.get("Items", [])
+    badges = await _badges_for(device, emby_items)
+
+    items = []
+    for item in emby_items:
+        media_item = _item_to_browse_item(device, item, badges.get(item.get("Id", "")))
+        if not media_item:
+            continue
+        position = (item.get("UserData") or {}).get("PlaybackPositionTicks") or 0
+        if shortcut == CONTINUE_ID and position > 0:
+            info = f"Reprendre à {_fmt_duration(position // TICKS_PER_SECOND)}"
+            media_item.subtitle = f"{info} · {media_item.subtitle}" if media_item.subtitle else info
+        items.append(media_item)
+
+    return BrowseResults(
+        media=BrowseMediaItem(title=title, media_class=MediaClass.DIRECTORY, media_type=shortcut,
+                              media_id=shortcut, can_browse=True, items=items),
+        pagination=Pagination(page=page, limit=limit, count=result.get("TotalRecordCount", len(items))),
+    )
+
+
 async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOptions) -> BrowseResults | StatusCodes:
     """A movie's page: play, resume, info, summary, audio tracks and chapters, as list rows."""
     item = await device.client.get_item(device.user_id, item_id)
@@ -245,13 +303,11 @@ async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOp
     if details:
         rows.append(_text_row(item_id, "info", " · ".join(details)))
 
-    overview = (item.get("Overview") or "").strip()
-    lines = textwrap.wrap(overview, OVERVIEW_LINE_WIDTH)
-    if len(lines) > OVERVIEW_MAX_LINES:
-        lines = lines[:OVERVIEW_MAX_LINES]
-        lines[-1] = lines[-1].rstrip(" .,;") + "…"
-    for index, line in enumerate(lines):
-        rows.append(_text_row(item_id, f"txt{index}", line))
+    if (item.get("Overview") or "").strip():
+        rows.append(BrowseMediaItem(
+            title="Résumé", media_class=MediaClass.DIRECTORY, media_type="summary",
+            media_id=f"summary_{item_id}", can_browse=True, thumbnail=poster,
+        ))
 
     audio = [s.get("DisplayTitle") for s in item.get("MediaStreams") or [] if s.get("Type") == "Audio" and s.get("DisplayTitle")]
     if audio:
@@ -274,6 +330,23 @@ async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOp
             can_browse=True, can_play=True, thumbnail=poster,
             duration=_duration_seconds(item),
         ),
+        rows, options,
+    )
+
+
+async def _browse_summary(device: EmbyServer, item_id: str, options: BrowseOptions) -> BrowseResults | StatusCodes:
+    """The summary of a title, wrapped in list rows (the Remote cannot show a paragraph)."""
+    item = await device.client.get_item(device.user_id, item_id)
+    if not item:
+        return StatusCodes.NOT_FOUND
+    lines = textwrap.wrap((item.get("Overview") or "").strip(), OVERVIEW_LINE_WIDTH)
+    if len(lines) > OVERVIEW_MAX_LINES:
+        lines = lines[:OVERVIEW_MAX_LINES]
+        lines[-1] = lines[-1].rstrip(" .,;") + "…"
+    rows = [_text_row(item_id, f"txt{index}", line) for index, line in enumerate(lines)]
+    return _paged_container(
+        BrowseMediaItem(title="Résumé", media_class=MediaClass.DIRECTORY, media_type="summary",
+                        media_id=f"summary_{item_id}", can_browse=True),
         rows, options,
     )
 
