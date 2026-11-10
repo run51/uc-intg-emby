@@ -40,6 +40,10 @@ EMBY_TYPE_TO_MEDIA_CLASS: dict[str, MediaClass] = {
 PLAYABLE_TYPES = {"Movie", "Episode", "Audio", "MusicVideo", "Video"}
 BROWSABLE_TYPES = {"Series", "Season", "MusicAlbum", "MusicArtist", "Folder", "CollectionFolder", "BoxSet", "Playlist"}
 
+# Libraries listed flat (all their items, alphabetically) instead of following the folder tree,
+# keyed by Emby CollectionType. A movie library then shows the movies, not the disk folders.
+FLAT_LIBRARY_ITEM_TYPES = {"movies": "Movie", "musicvideos": "MusicVideo,Video"}
+
 
 async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | StatusCodes:
     if not device.client or not device.user_id:
@@ -52,8 +56,8 @@ async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | 
         return await _browse_root(device)
 
     if media_id.startswith("library_"):
-        library_id = media_id[8:]
-        return await _browse_library(device, library_id, options)
+        library_id, _, library_type = media_id[8:].partition(":")
+        return await _browse_library(device, library_id, options, library_type)
 
     if media_id.startswith("folder_"):
         folder_id = media_id[7:]
@@ -106,7 +110,7 @@ async def _browse_root(device: EmbyServer) -> BrowseResults:
             title=lib_name,
             media_class=media_class,
             media_type="library",
-            media_id=f"library_{lib_id}",
+            media_id=f"library_{lib_id}:{lib_type}" if lib_type in FLAT_LIBRARY_ITEM_TYPES else f"library_{lib_id}",
             can_browse=True,
             can_play=False,
             thumbnail=thumbnail or None,
@@ -126,12 +130,18 @@ async def _browse_root(device: EmbyServer) -> BrowseResults:
     )
 
 
-async def _browse_library(device: EmbyServer, library_id: str, options: BrowseOptions) -> BrowseResults:
+async def _browse_library(
+    device: EmbyServer, library_id: str, options: BrowseOptions, library_type: str = ""
+) -> BrowseResults:
     page = options.paging.page if hasattr(options, "paging") and options.paging and hasattr(options.paging, "page") and options.paging.page else 1
     limit = options.paging.limit if hasattr(options, "paging") and options.paging and hasattr(options.paging, "limit") and options.paging.limit else 50
 
     start_index = (page - 1) * limit
-    result = await device.client.get_items(device.user_id, parent_id=library_id, start_index=start_index, limit=limit)
+    item_types = FLAT_LIBRARY_ITEM_TYPES.get(library_type, "")
+    result = await device.client.get_items(
+        device.user_id, parent_id=library_id, item_type=item_types,
+        start_index=start_index, limit=limit, recursive=bool(item_types),
+    )
 
     total = result.get("TotalRecordCount", 0)
     emby_items = result.get("Items", [])

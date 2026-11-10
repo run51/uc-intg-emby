@@ -117,14 +117,16 @@ class EmbyClient:
 
     async def get_items(
         self, user_id: str, parent_id: str = "", item_type: str = "",
-        start_index: int = 0, limit: int = 50, sort_by: str = "SortName",
+        start_index: int = 0, limit: int = 50, sort_by: str = "SortName", recursive: bool = False,
     ) -> dict[str, Any]:
         endpoint = f"/Users/{user_id}/Items?StartIndex={start_index}&Limit={limit}&SortBy={sort_by}&SortOrder=Ascending"
         if parent_id:
             endpoint += f"&ParentId={parent_id}"
         if item_type:
             endpoint += f"&IncludeItemTypes={item_type}"
-        endpoint += "&Fields=PrimaryImageAspectRatio,Overview&ImageTypeLimit=1"
+        if recursive:
+            endpoint += "&Recursive=true"
+        endpoint += "&Fields=PrimaryImageAspectRatio,Overview,ProductionYear&ImageTypeLimit=1"
         result = await self._get(endpoint)
         if isinstance(result, dict):
             return result
@@ -132,7 +134,7 @@ class EmbyClient:
 
     async def search_items(self, user_id: str, search_term: str, limit: int = 30) -> list[dict[str, Any]]:
         endpoint = f"/Users/{user_id}/Items?SearchTerm={search_term}&Limit={limit}&Recursive=true"
-        endpoint += "&Fields=PrimaryImageAspectRatio&ImageTypeLimit=1"
+        endpoint += "&Fields=PrimaryImageAspectRatio,ProductionYear&ImageTypeLimit=1"
         result = await self._get(endpoint)
         if isinstance(result, dict):
             return result.get("Items", [])
