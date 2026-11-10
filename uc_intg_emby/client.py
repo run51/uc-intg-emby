@@ -2,6 +2,7 @@
 import logging
 import ssl
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 import certifi
@@ -97,11 +98,16 @@ class EmbyClient:
             return await self._post(f"/Sessions/{session_id}/Command/{command}")
         return await self._post(f"/Sessions/{session_id}/Command", {"Name": command, "Arguments": arguments})
 
-    async def play_items(self, session_id: str, item_ids: list[str], start_index: int = 0) -> bool:
-        return await self._post(
-            f"/Sessions/{session_id}/Playing",
-            {"ItemIds": item_ids, "StartIndex": start_index, "PlayCommand": "PlayNow"},
-        )
+    async def play_items(
+        self, session_id: str, item_ids: list[str], start_index: int = 0, user_id: str = ""
+    ) -> bool:
+        # Emby documents ItemIds and PlayCommand as required query parameters: send them there,
+        # and keep them in the body as well for servers that read the body.
+        ids = quote(",".join(item_ids), safe=",")
+        body: dict[str, Any] = {"ItemIds": item_ids, "StartIndex": start_index, "PlayCommand": "PlayNow"}
+        if user_id:
+            body["ControllingUserId"] = user_id
+        return await self._post(f"/Sessions/{session_id}/Playing?ItemIds={ids}&PlayCommand=PlayNow", body)
 
     async def get_libraries(self, user_id: str) -> list[dict[str, Any]]:
         result = await self._get(f"/Users/{user_id}/Views")
