@@ -109,7 +109,7 @@ async def _browse_root(device: EmbyServer) -> BrowseResults:
             media_id=f"library_{lib_id}",
             can_browse=True,
             can_play=False,
-            thumbnail=thumbnail,
+            thumbnail=thumbnail or None,
         ))
 
     return BrowseResults(
@@ -228,5 +228,5 @@ def _item_to_browse_item(device: EmbyServer, item: dict) -> BrowseMediaItem | No
         media_id=media_id,
         can_browse=is_browsable,
         can_play=is_playable,
-        thumbnail=thumbnail,
+        thumbnail=thumbnail or None,
     )
