@@ -1,6 +1,7 @@
 """Emby server device. :copyright: (c) 2026 by Meir Miyara. :license: MPL-2.0"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -12,6 +13,9 @@ from uc_intg_emby.config import EmbyDeviceConfig
 from uc_intg_emby.const import EMBY_POLL_INTERVAL, EMBY_TICKS_PER_SECOND
 
 _LOG = logging.getLogger(__name__)
+
+# Seconds between connection attempts after a failure (about one minute in total).
+CONNECT_RETRY_DELAYS = (2, 4, 8, 15, 30)
 
 
 def sanitize_id(value: str) -> str:
@@ -90,15 +94,26 @@ class EmbyServer(PollingDevice):
         return session.get("Id") if session else None
 
     async def establish_connection(self) -> EmbyClient:
-        if self._client:
-            await self._client.close()
-        self._client = EmbyClient(self._device_config.server_url, self._device_config.api_key)
-        await self._client.connect()
-
-        if not await self._client.test_connection():
+        # The framework connects only once, right after the Remote wakes up, often before its
+        # Wi-Fi is back. Retry for about a minute instead of staying offline until next wake-up.
+        self._connect_cancelled = False
+        delays = iter(CONNECT_RETRY_DELAYS)
+        while True:
+            if self._client:
+                await self._client.close()
+            self._client = EmbyClient(self._device_config.server_url, self._device_config.api_key)
+            await self._client.connect()
+            if await self._client.test_connection():
+                break
             await self._client.close()
             self._client = None
-            raise ConnectionError(f"Cannot reach Emby server at {self._device_config.server_url}")
+            delay = next(delays, None)
+            if delay is None or self._connect_cancelled:
+                raise ConnectionError(f"Cannot reach Emby server at {self._device_config.server_url}")
+            _LOG.info("[%s] Emby server not reachable yet, retrying in %ds", self.log_id, delay)
+            await asyncio.sleep(delay)
+            if self._connect_cancelled:
+                raise ConnectionError("Connection cancelled")
 
         server_info = await self._client.get_server_info()
         if server_info:
@@ -120,6 +135,11 @@ class EmbyServer(PollingDevice):
             return
         try:
             await self._update_state()
+            if self._state != "ON":
+                # A poll succeeded again after a failure: the server is back.
+                _LOG.info("[%s] Emby server reachable again", self.log_id)
+                self._state = "ON"
+                self.events.emit(DeviceEvents.CONNECTED, self.identifier)
             self._create_dynamic_entities()
             self.push_update()
         except Exception as err:
@@ -129,6 +149,7 @@ class EmbyServer(PollingDevice):
                 self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
 
     async def disconnect(self) -> None:
+        self._connect_cancelled = True
         if self._client:
             await self._client.close()
             self._client = None
