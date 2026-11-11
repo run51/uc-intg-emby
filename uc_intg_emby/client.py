@@ -181,6 +181,30 @@ class EmbyClient:
             return None
         return result
 
+    async def get_oppo_tracks(self) -> dict[str, Any] | None:
+        """OPPO state with its audio and subtitle menus, from the Emby.Oppo plugin (None if unavailable)."""
+        if not self._oppo_plugin:
+            return None
+        result = await self._get("/Oppo/Remote/State?Tracks=true")
+        return result if isinstance(result, dict) else None
+
+    async def select_oppo_track(self, subtitles: bool, index: int) -> bool:
+        """Picks an audio track (1 = first) or subtitles (0 = none) in the OPPO menu, via the Emby.Oppo plugin."""
+        result = await self._post_json(f"/Oppo/Remote/{'Subtitle' if subtitles else 'Audio'}", {"Index": index})
+        return bool(result and result.get("Ok", True))
+
+    async def _post_json(self, endpoint: str, data: dict | None = None) -> dict | None:
+        if not self._session:
+            return None
+        try:
+            async with self._session.post(self._url(endpoint), json=data, timeout=aiohttp.ClientTimeout(total=EMBY_API_TIMEOUT)) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                _LOG.warning("POST %s returned %d", endpoint, resp.status)
+        except Exception as err:
+            _LOG.debug("POST %s failed: %s", endpoint, err)
+        return None
+
     def _oppo_plugin_missing(self) -> None:
         # Stop asking until the next connection: without the plugin every call would fail.
         _LOG.info("Emby.Oppo plugin not available: no format badges or Blu-ray chapters")

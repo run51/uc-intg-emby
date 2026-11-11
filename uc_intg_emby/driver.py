@@ -3,6 +3,7 @@ from ucapi_framework import BaseIntegrationDriver
 
 from uc_intg_emby.config import EmbyDeviceConfig
 from uc_intg_emby.device import EmbyServer
+from uc_intg_emby.oppo_tracks import OppoAudioSelect, OppoSubtitleSelect
 from uc_intg_emby.sensor import (
     EmbyActiveSessionsSensor,
     EmbyServerNameSensor,
@@ -24,6 +25,8 @@ class EmbyDriver(BaseIntegrationDriver[EmbyServer, EmbyDeviceConfig]):
                 EmbyActiveSessionsSensor,
                 EmbyServerURLSensor,
                 EmbyServerOSSensor,
+                OppoAudioSelect,
+                OppoSubtitleSelect,
             ],
             driver_id="uc-intg-emby",
             require_connection_before_registry=True,

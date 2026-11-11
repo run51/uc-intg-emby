@@ -37,6 +37,7 @@ class EmbyServer(PollingDevice):
         self._server_os: str = ""
         self._sessions: dict[str, dict[str, Any]] = {}
         self._known_device_ids: set[str] = set()
+        self._oppo_tracks: Any = None
 
     @property
     def identifier(self) -> str:
@@ -85,6 +86,15 @@ class EmbyServer(PollingDevice):
     @property
     def client(self) -> EmbyClient | None:
         return self._client
+
+    @property
+    def oppo_tracks(self) -> Any:
+        """Audio and subtitle menus of the OPPO (Emby.Oppo plugin), see oppo_tracks.OppoTracks."""
+        if self._oppo_tracks is None:
+            from uc_intg_emby.oppo_tracks import OppoTracks
+
+            self._oppo_tracks = OppoTracks(self)
+        return self._oppo_tracks
 
     def get_session(self, device_id: str) -> dict[str, Any] | None:
         return self._sessions.get(device_id)
@@ -141,6 +151,10 @@ class EmbyServer(PollingDevice):
                 self._state = "ON"
                 self.events.emit(DeviceEvents.CONNECTED, self.identifier)
             self._create_dynamic_entities()
+            try:
+                await self.oppo_tracks.poll()
+            except Exception as err:  # never let the track menus break the session polling
+                _LOG.debug("[%s] OPPO track menus: %s", self.log_id, err)
             self.push_update()
         except Exception as err:
             _LOG.debug("[%s] Poll error: %s", self.log_id, err)
