@@ -22,7 +22,7 @@ PLACEHOLDER = "—"
 NO_SUBTITLES = "Aucun"
 # Refresh while a film plays: soon after it starts, then calmly (each refresh costs the OPPO a few queries).
 FIRST_REFRESH = 8.0
-RETRY_EMPTY = 20.0
+RETRY_EMPTY = 10.0
 REFRESH_PLAYING = 60.0
 REFRESH_AFTER_PICK = 2.5
 
@@ -62,6 +62,7 @@ class OppoTracks:
         self._item_id = ""
         self._next_at = 0.0
         self._busy = False
+        self._started = 0.0
 
     def _oppo_video(self) -> dict[str, Any] | None:
         for device_id, session in self._device.sessions.items():
@@ -87,6 +88,7 @@ class OppoTracks:
             changed = bool(self.audio or self.subtitles)
             self.audio, self.subtitles = [], []
             self._next_at = time.monotonic() + FIRST_REFRESH
+            self._started = time.monotonic()
             return changed
         if self._busy or not self._next_at or time.monotonic() < self._next_at:
             return False
@@ -103,7 +105,12 @@ class OppoTracks:
             self._busy = False
         audio = (state or {}).get("Audio") or []
         subtitles = (state or {}).get("Subtitles") or []
-        self._next_at = time.monotonic() + (REFRESH_PLAYING if audio else RETRY_EMPTY)
+        # Right after a start the OPPO reports only the current audio track and no subtitle menu yet
+        # (seen on a Blu-ray folder: 1 track and 0 subtitles, then 14 and 23 a minute later): ask again soon.
+        # A film may really have one track and no subtitles: give up the quick retries after two minutes.
+        complete = bool(audio) and (bool(subtitles) or len(audio) > 1)
+        complete = complete or time.monotonic() - self._started > 120
+        self._next_at = time.monotonic() + (REFRESH_PLAYING if complete else RETRY_EMPTY)
         if not self._item_id:
             return False
         changed = audio != self.audio or subtitles != self.subtitles
@@ -138,8 +145,9 @@ class OppoTrackSelect(SelectEntity):
             {"fr": "Sous-titres", "en": "Subtitles"} if self.SUBTITLES else {"fr": "Langue", "en": "Audio"},
             attributes={
                 select.Attributes.STATE: select.States.UNKNOWN,
-                select.Attributes.OPTIONS: [PLACEHOLDER],
-                select.Attributes.CURRENT_OPTION: PLACEHOLDER,
+                # Empty at first so that the first sync really sends the placeholder to the remote.
+                select.Attributes.OPTIONS: [],
+                select.Attributes.CURRENT_OPTION: "",
             },
             cmd_handler=self._handle_command,
         )
