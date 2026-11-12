@@ -7,6 +7,7 @@ from urllib.parse import quote
 import aiohttp
 import certifi
 
+from uc_intg_emby import images
 from uc_intg_emby.const import EMBY_API_TIMEOUT, EMBY_CONNECTION_TIMEOUT
 
 _LOG = logging.getLogger(__name__)
@@ -225,14 +226,15 @@ class EmbyClient:
         return result if isinstance(result, list) else []
 
     def image_url(self, item_id: str, max_height: int = 300) -> str:
-        return f"{self._server_url}/Items/{item_id}/Images/Primary?maxHeight={max_height}&api_key={self._api_key}"
+        return images.wrap(
+            f"{self._server_url}/Items/{item_id}/Images/Primary?maxHeight={max_height}&api_key={self._api_key}")
 
     def chapter_image_url(self, item_id: str, index: int, tag: str = "", max_height: int = 300) -> str:
-        return (f"{self._server_url}/Items/{item_id}/Images/Chapter/{index}"
-                f"?maxHeight={max_height}&tag={tag}&api_key={self._api_key}")
+        return images.wrap(f"{self._server_url}/Items/{item_id}/Images/Chapter/{index}"
+                           f"?maxHeight={max_height}&tag={tag}&api_key={self._api_key}")
 
     def oppo_chapter_image_url(self, item_id: str, index: int) -> str:
-        return f"{self._server_url}/Oppo/Remote/ChapterImage?Id={quote(item_id)}&Index={index}"
+        return images.wrap(f"{self._server_url}/Oppo/Remote/ChapterImage?Id={quote(item_id)}&Index={index}")
 
     @property
     def server_url(self) -> str:

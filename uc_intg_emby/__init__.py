@@ -8,6 +8,7 @@ from pathlib import Path
 from ucapi import DeviceStates
 from ucapi_framework import BaseConfigManager, get_config_path
 
+from uc_intg_emby import images
 from uc_intg_emby.config import EmbyDeviceConfig
 from uc_intg_emby.driver import EmbyDriver
 from uc_intg_emby.setup_flow import EmbySetupFlow
@@ -34,6 +35,7 @@ async def main() -> None:
 
     driver = EmbyDriver()
     config_path = get_config_path(driver.api.config_dir_path or "")
+    images.setup(os.path.join(config_path, "images"))
     config_manager = BaseConfigManager(
         config_path,
         add_handler=driver.on_device_added,
