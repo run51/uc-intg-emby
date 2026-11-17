@@ -138,7 +138,19 @@ class EmbyServer(PollingDevice):
             _LOG.warning("[%s] Initial session query failed, continuing with defaults", self.log_id)
 
         self._state = "ON"
+        self._start_library_cache()
         return self._client
+
+    def _start_library_cache(self) -> None:
+        """Download the movie libraries in the background, once per integration run (see library_cache)."""
+        from uc_intg_emby import library_cache
+        from uc_intg_emby.browser import FLAT_LIBRARY_ITEM_TYPES
+
+        task = getattr(self, "_library_task", None)
+        if library_cache.CACHE is None or (task is not None and not task.done()):
+            return
+        self._library_task = asyncio.get_running_loop().create_task(
+            library_cache.CACHE.warm_up(self, FLAT_LIBRARY_ITEM_TYPES))
 
     async def poll_device(self) -> None:
         if not self._client:

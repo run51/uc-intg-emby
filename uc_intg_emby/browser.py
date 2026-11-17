@@ -17,6 +17,8 @@ from ucapi.media_player import (
     SearchResults,
 )
 
+from uc_intg_emby import library_cache
+
 if TYPE_CHECKING:
     from uc_intg_emby.device import EmbyServer
 
@@ -186,14 +188,24 @@ async def _browse_library(
     page, limit = _paging(options)
     start_index = (page - 1) * limit
     item_types = FLAT_LIBRARY_ITEM_TYPES.get(library_type, "")
-    result = await device.client.get_items(
-        device.user_id, parent_id=library_id, item_type=item_types,
-        start_index=start_index, limit=limit, recursive=bool(item_types),
-    )
-
-    total = result.get("TotalRecordCount", 0)
-    emby_items = result.get("Items", [])
-    badges = await _badges_for(device, emby_items)
+    cached = None
+    if item_types and library_cache.CACHE is not None:
+        # The whole list is kept on the Remote: a page never waits for the server (see library_cache)
+        cached = library_cache.CACHE.get(library_cache.CACHE.key(device, library_id, item_types))
+        if cached is None or library_cache.CACHE.stale(cached):
+            library_cache.CACHE.refresh_soon(device, library_id, item_types)
+    if cached is not None:
+        total = len(cached["items"])
+        emby_items = cached["items"][start_index:start_index + limit]
+        badges = cached.get("badges", {})
+    else:
+        result = await device.client.get_items(
+            device.user_id, parent_id=library_id, item_type=item_types,
+            start_index=start_index, limit=limit, recursive=bool(item_types),
+        )
+        total = result.get("TotalRecordCount", 0)
+        emby_items = result.get("Items", [])
+        badges = await _badges_for(device, emby_items)
 
     items = []
     for item in emby_items:

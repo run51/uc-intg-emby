@@ -225,9 +225,12 @@ class EmbyClient:
         result = await self._get("/Users")
         return result if isinstance(result, list) else []
 
+    def image_source_url(self, item_id: str, max_height: int = 300) -> str:
+        """Address of a poster on the Emby server (what the picture cache downloads)."""
+        return f"{self._server_url}/Items/{item_id}/Images/Primary?maxHeight={max_height}&api_key={self._api_key}"
+
     def image_url(self, item_id: str, max_height: int = 300) -> str:
-        return images.wrap(
-            f"{self._server_url}/Items/{item_id}/Images/Primary?maxHeight={max_height}&api_key={self._api_key}")
+        return images.wrap(self.image_source_url(item_id, max_height))
 
     def chapter_image_url(self, item_id: str, index: int, tag: str = "", max_height: int = 300) -> str:
         return images.wrap(f"{self._server_url}/Items/{item_id}/Images/Chapter/{index}"
