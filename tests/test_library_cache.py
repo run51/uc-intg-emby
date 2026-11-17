@@ -104,3 +104,31 @@ def test_library_page_is_cut_from_the_kept_list(tmp_path, monkeypatch) -> None:
     assert result.pagination.count == 120
     assert [i.title for i in result.media.items][:2] == ["Film 040", "Film 041"]
     assert result.media.items[0].subtitle == "4K"  # OPPO badge kept with the list
+
+
+def test_dropped_request_is_retried_and_a_partial_list_never_kept(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(images, "CACHE", FakePictures())
+    monkeypatch.setattr(library_cache, "RETRY_PAUSE_S", 0)
+    cache = library_cache.LibraryCache(str(tmp_path))
+    client = FakeClient(450)
+    device = FakeDevice(client)
+    real = client.get_items
+    drops = {"left": 1}
+
+    async def flaky(user_id, parent_id="", item_type="", start_index=0, limit=50, recursive=False):
+        if start_index == 200 and drops["left"]:
+            drops["left"] -= 1
+            return {"Items": [], "TotalRecordCount": 0}  # what a timed-out request looks like
+        return await real(user_id, parent_id, item_type, start_index, limit, recursive)
+
+    client.get_items = flaky
+    entry = asyncio.run(cache.fill(device, "3", "Movie"))
+    assert entry is not None and len(entry["items"]) == 450  # the dropped page was asked again
+
+    drops["left"] = 99  # the server stops answering after the first page
+    assert asyncio.run(cache.fill(device, "3", "Movie")) is None
+    assert len(cache.get(cache.key(device, "3", "Movie"))["items"]) == 450  # old list kept, not 200
+
+    fresh = library_cache.LibraryCache(str(tmp_path / "new"))
+    assert asyncio.run(fresh.fill(device, "3", "Movie")) is None  # nothing kept rather than 200 titles
+    assert fresh.get(fresh.key(device, "3", "Movie")) is None

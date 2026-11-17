@@ -30,6 +30,8 @@ REFRESH_S = 6 * 3600  # all lists are refreshed this often while the integration
 WARM_UP_DELAY_S = 20  # after connecting, before the first download (the Remote has just woken up)
 CHUNK = 200  # titles per request
 BADGE_CHUNK = 100  # ids per OPPO badges request
+TRIES = 3  # attempts per request (the Remote's Wi-Fi sometimes drops a request)
+RETRY_PAUSE_S = 2.0
 DROP_FIELDS = ("Overview",)  # not shown in lists (the title page asks for the item itself)
 
 
@@ -64,33 +66,44 @@ class LibraryCache:
         client = device.client
         if client is None:
             return None
-        items: list[dict[str, Any]] = []
-        start = 0
-        while True:
-            result = await client.get_items(
-                device.user_id, parent_id=library_id, item_type=item_types,
-                start_index=start, limit=CHUNK, recursive=True,
-            )
-            batch = result.get("Items") or []
-            total = result.get("TotalRecordCount", 0)
-            if not batch:
-                if start < total:  # the server stopped answering midway: keep the old list
-                    return None
-                break
-            items.extend({k: v for k, v in item.items() if k not in DROP_FIELDS} for item in batch)
-            start += len(batch)
-            if start >= total:
-                break
         key = self.key(device, library_id, item_types)
-        if not items and (self.lists.get(key) or {}).get("items"):
-            # A request that timed out looks like an empty library: never replace a list by nothing
-            _LOG.info("Library %s: no answer from the server, the kept list stays", library_id)
-            return None
-        badges: dict[str, dict] = {}
+        old = self.lists.get(key) or {}
+        items: list[dict[str, Any]] = []
+        total: int | None = None  # from the first answer: a request that times out reports 0
+        while total is None or len(items) < total:
+            batch: list[dict[str, Any]] = []
+            for attempt in range(TRIES):
+                result = await client.get_items(
+                    device.user_id, parent_id=library_id, item_type=item_types,
+                    start_index=len(items), limit=CHUNK, recursive=True,
+                )
+                batch = result.get("Items") or []
+                if batch:
+                    if total is None:
+                        total = result.get("TotalRecordCount") or len(batch)
+                    break
+                if attempt < TRIES - 1:
+                    await asyncio.sleep(RETRY_PAUSE_S)
+            if not batch:
+                if total is None and not old.get("items"):
+                    break  # an empty library, or no answer and nothing kept yet
+                # The server stopped answering: never keep a partial list, keep the old one
+                _LOG.info("Library %s: no answer from the server after %d titles, the kept list stays",
+                          library_id, len(items))
+                return None
+            items.extend({k: v for k, v in item.items() if k not in DROP_FIELDS} for item in batch)
         ids = [i.get("Id") for i in items if i.get("Id")]
+        wanted = set(ids)
+        # A badges request that is not answered keeps the badges already known
+        badges: dict[str, dict] = {i: b for i, b in (old.get("badges") or {}).items() if i in wanted}
         for first in range(0, len(ids), BADGE_CHUNK):
-            got = await client.get_oppo_badges(ids[first:first + BADGE_CHUNK]) or []
-            badges.update({b["Id"]: b for b in got if isinstance(b, dict) and b.get("Id")})
+            for attempt in range(TRIES):
+                got = await client.get_oppo_badges(ids[first:first + BADGE_CHUNK])
+                if got is not None or not getattr(client, "_oppo_plugin", True):
+                    badges.update({b["Id"]: b for b in got or [] if isinstance(b, dict) and b.get("Id")})
+                    break
+                if attempt < TRIES - 1:
+                    await asyncio.sleep(RETRY_PAUSE_S)
         entry = {"at": time.time(), "items": items, "badges": badges}
         self.lists[key] = entry
         self._save(key, entry)
