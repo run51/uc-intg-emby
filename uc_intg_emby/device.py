@@ -4,13 +4,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from ucapi_framework import DeviceEvents, PollingDevice
 
 from uc_intg_emby.client import EmbyClient
 from uc_intg_emby.config import EmbyDeviceConfig
-from uc_intg_emby.const import EMBY_POLL_INTERVAL, EMBY_TICKS_PER_SECOND
+from uc_intg_emby.const import (
+    CLEARED_HOLD_S,
+    EMBY_POLL_INTERVAL,
+    EMBY_POLL_INTERVAL_PLAYING,
+    EMBY_TICKS_PER_SECOND,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -38,6 +44,9 @@ class EmbyServer(PollingDevice):
         self._sessions: dict[str, dict[str, Any]] = {}
         self._known_device_ids: set[str] = set()
         self._oppo_tracks: Any = None
+        # device id -> (title id, monotonic time): stopped from the Remote, hidden while the server still
+        # reports it (the Emby.Oppo plugin tells the server several seconds after the player stopped)
+        self._cleared: dict[str, tuple[str, float]] = {}
 
     @property
     def identifier(self) -> str:
@@ -98,6 +107,23 @@ class EmbyServer(PollingDevice):
 
     def get_session(self, device_id: str) -> dict[str, Any] | None:
         return self._sessions.get(device_id)
+
+    def clear_playing(self, device_id: str) -> None:
+        """Show the player stopped at once: its title is hidden until the server stops reporting it."""
+        item = ((self._sessions.get(device_id) or {}).get("NowPlayingItem") or {}).get("Id", "")
+        if item:
+            self._cleared[device_id] = (item, time.monotonic())
+
+    def now_playing(self, device_id: str) -> dict[str, Any] | None:
+        """The title a session plays, None when nothing plays or it was just stopped from the Remote."""
+        item = (self._sessions.get(device_id) or {}).get("NowPlayingItem")
+        cleared = self._cleared.get(device_id)
+        if cleared is not None:
+            if not item or item.get("Id") != cleared[0] or time.monotonic() - cleared[1] > CLEARED_HOLD_S:
+                del self._cleared[device_id]  # the server caught up, or another title plays
+            else:
+                return None
+        return item
 
     def get_session_id_for_device(self, device_id: str) -> str | None:
         session = self._sessions.get(device_id)
@@ -162,6 +188,9 @@ class EmbyServer(PollingDevice):
                 _LOG.info("[%s] Emby server reachable again", self.log_id)
                 self._state = "ON"
                 self.events.emit(DeviceEvents.CONNECTED, self.identifier)
+            # Poll faster while something plays: a stop made elsewhere (player remote, end of film) shows sooner
+            playing = any(self.now_playing(d) for d in self._sessions)
+            self._poll_interval = EMBY_POLL_INTERVAL_PLAYING if playing else EMBY_POLL_INTERVAL
             self._create_dynamic_entities()
             try:
                 await self.oppo_tracks.poll()

@@ -33,6 +33,30 @@ class EmbySetupFlow(BaseSetupFlow[EmbyDeviceConfig]):
                     "label": {"en": "User ID (optional, auto-detected if empty)"},
                     "field": {"text": {"value": ""}},
                 },
+                {
+                    "id": "volume_entity",
+                    "label": {
+                        "en": "Optional: send the volume keys to this entity (an amplifier's volume)",
+                        "fr": "Optionnel : envoyer les touches de volume à cette entité (volume d'un ampli)",
+                    },
+                    "field": {"text": {"value": "", "placeholder": "denon_rs232.main.number.denon.volume"}},
+                },
+                {
+                    "id": "mute_entity",
+                    "label": {
+                        "en": "Optional: send the mute key to this media player",
+                        "fr": "Optionnel : envoyer la touche sourdine à ce lecteur",
+                    },
+                    "field": {"text": {"value": "", "placeholder": "denon_rs232.main.media_player.denon"}},
+                },
+                {
+                    "id": "remote_api_key",
+                    "label": {
+                        "en": "Remote API key (needed for the two options above)",
+                        "fr": "Clé d'API de la remote (nécessaire pour les deux options ci-dessus)",
+                    },
+                    "field": {"text": {"value": ""}},
+                },
             ],
         )
 
@@ -77,6 +101,9 @@ class EmbySetupFlow(BaseSetupFlow[EmbyDeviceConfig]):
                 api_key=api_key,
                 user_id=user_id,
                 server_version=server_version,
+                remote_api_key=input_values.get("remote_api_key", "").strip(),
+                volume_entity=input_values.get("volume_entity", "").strip(),
+                mute_entity=input_values.get("mute_entity", "").strip(),
             )
         finally:
             await client.close()

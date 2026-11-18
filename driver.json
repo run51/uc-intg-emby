@@ -1,6 +1,6 @@
 {
   "driver_id": "uc-intg-emby",
-  "version": "3.0.12-test2",
+  "version": "3.0.13-test1",
   "min_core_api": "0.22.0",
   "name": {
     "en": "Emby Media Server"

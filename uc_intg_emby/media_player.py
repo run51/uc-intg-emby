@@ -8,7 +8,7 @@ from ucapi import media_player, StatusCodes
 from ucapi.media_player import BrowseOptions, BrowseResults, SearchOptions, SearchResults
 from ucapi_framework import MediaPlayerEntity
 
-from uc_intg_emby import browser
+from uc_intg_emby import browser, forward
 from uc_intg_emby.config import EmbyDeviceConfig
 from uc_intg_emby.const import EMBY_TICKS_PER_SECOND
 from uc_intg_emby.device import EmbyServer, sanitize_id
@@ -45,6 +45,10 @@ VOLUME_FEATURES = [
     media_player.Features.MUTE_TOGGLE,
 ]
 
+# Simple command: show the player stopped at once, without sending anything (for a macro that stops the
+# player itself, e.g. the OPPO's own stop, which the Emby server learns only seconds later).
+CLEAR_PLAYBACK = "CLEAR_PLAYBACK"
+
 
 class EmbyMediaPlayer(MediaPlayerEntity):
     """Media player entity for an active Emby session."""
@@ -66,8 +70,14 @@ class EmbyMediaPlayer(MediaPlayerEntity):
         else:
             entity_name = client_name
 
+        self._device_config = device_config
         features = list(BASE_FEATURES)
-        if "VolumeUp" in self._supported_commands:
+        if self._forwards_volume:
+            # Volume keys go to the amplifier: up/down (and mute), no volume level of the session shown
+            features.append(media_player.Features.VOLUME_UP_DOWN)
+            if device_config.mute_entity:
+                features.append(media_player.Features.MUTE_TOGGLE)
+        elif "VolumeUp" in self._supported_commands:
             features.extend(VOLUME_FEATURES)
 
         safe_id = sanitize_id(self._emby_device_id)
@@ -90,8 +100,14 @@ class EmbyMediaPlayer(MediaPlayerEntity):
                 media_player.Attributes.MEDIA_POSITION: 0,
             },
             device_class=media_player.DeviceClasses.STREAMING_BOX,
+            options={media_player.Options.SIMPLE_COMMANDS: [CLEAR_PLAYBACK]},
             cmd_handler=self._handle_command,
         )
+
+    @property
+    def _forwards_volume(self) -> bool:
+        cfg = self._device_config
+        return bool(getattr(cfg, "remote_api_key", "") and getattr(cfg, "volume_entity", ""))
 
     async def sync_state(self) -> None:
         session = self._device.get_session(self._emby_device_id)
@@ -114,7 +130,7 @@ class EmbyMediaPlayer(MediaPlayerEntity):
 
     def _build_attributes(self, session: dict[str, Any]) -> dict:
         attrs: dict[str, Any] = {}
-        now_playing = session.get("NowPlayingItem")
+        now_playing = self._device.now_playing(self._emby_device_id)  # None just after a stop from the Remote
         play_state = session.get("PlayState", {})
 
         if now_playing:
@@ -211,6 +227,24 @@ class EmbyMediaPlayer(MediaPlayerEntity):
     async def _handle_command(
         self, entity: media_player.MediaPlayer, cmd_id: str, params: dict[str, Any] | None
     ) -> StatusCodes:
+        cfg = self._device_config
+        if self._forwards_volume and cmd_id in (
+            media_player.Commands.VOLUME_UP, media_player.Commands.VOLUME_DOWN, media_player.Commands.MUTE_TOGGLE,
+        ):
+            if cmd_id == media_player.Commands.MUTE_TOGGLE:
+                target, forwarded = cfg.mute_entity, "media_player.mute_toggle"
+            else:
+                target = cfg.volume_entity
+                forwarded = forward.volume_command(target, cmd_id == media_player.Commands.VOLUME_UP)
+            ok = await forward.send(cfg.remote_api_key, target, forwarded)
+            return StatusCodes.OK if ok else StatusCodes.SERVICE_UNAVAILABLE
+        if cmd_id in (CLEAR_PLAYBACK, media_player.Commands.STOP):
+            # Shown stopped at once; the server reports the stop only seconds later
+            self._device.clear_playing(self._emby_device_id)
+            await self.sync_state()
+            if cmd_id == CLEAR_PLAYBACK:
+                return StatusCodes.OK
+
         session_id = self._device.get_session_id_for_device(self._emby_device_id)
         if not session_id:
             _LOG.warning("[%s] No active session for command %s", self.id, cmd_id)

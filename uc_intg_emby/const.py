@@ -1,6 +1,8 @@
 """Emby integration constants. :copyright: (c) 2026 by Meir Miyara. :license: MPL-2.0"""
 
 EMBY_POLL_INTERVAL = 5
+EMBY_POLL_INTERVAL_PLAYING = 2  # while a session plays: a stop shows sooner
+CLEARED_HOLD_S = 30  # a title stopped from the Remote stays hidden this long while the server still reports it
 EMBY_API_TIMEOUT = 10
 EMBY_CONNECTION_TIMEOUT = 5
 EMBY_TICKS_PER_SECOND = 10_000_000
