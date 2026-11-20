@@ -340,17 +340,12 @@ async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOp
                                     media_id=f"movie_{item_id}", can_play=True, thumbnail=poster))
     position = (item.get("UserData") or {}).get("PlaybackPositionTicks") or 0
     if position > 0:
+        # One resume row: straight into the main movie when the disc allows it (faster, no menu), else the disc.
         rows.append(BrowseMediaItem(
             title=f"⏯ Reprendre à {_fmt_duration(position // TICKS_PER_SECOND)}",
             media_class=MediaClass.MOVIE, media_type="resume",
-            media_id=f"resume_{item_id}_{position}", can_play=True, thumbnail=poster,
+            media_id=f"{'movieat' if main_movie else 'resume'}_{item_id}_{position}", can_play=True, thumbnail=poster,
         ))
-        if main_movie:
-            rows.append(BrowseMediaItem(
-                title=f"⏯ Film sans menu à {_fmt_duration(position // TICKS_PER_SECOND)}",
-                media_class=MediaClass.MOVIE, media_type="resume",
-                media_id=f"movieat_{item_id}_{position}", can_play=True, thumbnail=poster,
-            ))
 
     details = [part for part in (
         _info_line(item, badge),

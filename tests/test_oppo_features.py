@@ -87,9 +87,11 @@ def test_movie_without_menus_on_a_uhd_disc_with_dolby_vision_kept() -> None:
                                    MediaStreams=[{"Type": "Audio", "Codec": "truehd", "Profile": "TrueHD Atmos",
                                                   "DisplayTitle": "English TRUEHD 7.1"}]),
                         badges={"1": DV})
-    rows = titles(page(FakeDevice(client), "item_1"))
-    assert rows[:4] == ["▶ Lecture", "▶ Film sans menu", "⏯ Reprendre à 1 h 12", "⏯ Film sans menu à 1 h 12"]
-    assert rows[4] == "2 h 35 · 4K · Dolby Vision · UHD Blu-ray · Atmos"
+    result = page(FakeDevice(client), "item_1")
+    rows = titles(result)
+    assert rows[:3] == ["▶ Lecture", "▶ Film sans menu", "⏯ Reprendre à 1 h 12"]
+    assert result.media.items[2].media_id == "movieat_1_43200000000"  # resume goes straight into the main movie
+    assert rows[3] == "2 h 35 · 4K · Dolby Vision · UHD Blu-ray · Atmos"
 
 
 def test_no_movie_without_menus_on_dolby_vision_when_it_would_play_as_a_file() -> None:
@@ -100,6 +102,10 @@ def test_no_movie_without_menus_on_dolby_vision_when_it_would_play_as_a_file() -
 
 
 def test_no_movie_without_menus_on_a_dvd_a_file_or_several_discs() -> None:
+    result = page(FakeDevice(FakeClient(fmt={"Kind": "dvd", "Label": "DVD"},
+                                        item=movie(UserData={"PlaybackPositionTicks": 600 * 10_000_000}))), "item_1")
+    assert [(i.title, i.media_id) for i in result.media.items[:2]] == [
+        ("▶ Lecture", "item_1"), ("⏯ Reprendre à 10 min", "resume_1_6000000000")]  # the disc, with its menu
     for fmt, extra in (({"Kind": "dvd", "Label": "DVD"}, {}), ({"Kind": "file", "Label": "MKV"}, {}),
                        ({"Kind": "bluray", "Label": "Blu-ray", "MovieDisc": True}, {"PartCount": 2})):
         rows = titles(page(FakeDevice(FakeClient(fmt=fmt, item=movie(**extra))), "item_1"))
