@@ -182,6 +182,26 @@ class EmbyClient:
             return None
         return result
 
+    async def get_oppo_format(self, item_id: str) -> dict[str, Any] | None:
+        """Disc format of a title from the Emby.Oppo plugin: Kind (uhd, bluray, dvd, file…), Label, and MovieDisc
+        (True when "movie without menus" keeps Dolby Vision). None if the plugin is not installed."""
+        if not self._oppo_plugin:
+            return None
+        result = await self._get(f"/Oppo/Remote/Format?Id={quote(item_id)}")
+        return result if isinstance(result, dict) else None
+
+    async def oppo_main_movie(self, item_id: str) -> bool:
+        """Tells the Emby.Oppo plugin that the next play of this title starts its main movie, without the disc menus."""
+        result = await self._post_json(f"/Oppo/Remote/MainMovie?Id={quote(item_id)}")
+        return bool(result and result.get("Ok", True))
+
+    async def get_oppo_audio_filter(self, kind: str) -> set[str] | None:
+        """Ids of the titles with an audio track of a kind (atmos, dtsx…), from the Emby.Oppo plugin."""
+        if not self._oppo_plugin:
+            return None
+        result = await self._get(f"/Oppo/Remote/AudioFilter?Kind={quote(kind)}")
+        return {str(i) for i in result} if isinstance(result, list) else None
+
     async def get_oppo_tracks(self) -> dict[str, Any] | None:
         """OPPO state with its audio and subtitle menus, from the Emby.Oppo plugin (None if unavailable)."""
         if not self._oppo_plugin:

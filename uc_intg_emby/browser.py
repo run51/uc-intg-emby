@@ -56,6 +56,11 @@ OVERVIEW_LINE_WIDTH = 60
 OVERVIEW_MAX_LINES = 20
 MAX_AUDIO_TRACKS = 3
 
+# "Filtres" folder at the top of a flat library (Emby.Oppo plugin): same lists as the web remote's filters.
+# kind → label. Atmos / DTS:X come from the plugin's audio analysis, Dolby Vision / 4K from its badges.
+FILTERS = {"atmos": "Dolby Atmos", "dtsx": "DTS:X", "dv": "Dolby Vision", "4k": "4K"}
+DISC_KINDS = {"uhd", "bluray", "dvd"}
+
 # Shortcuts shown above the libraries when they are not empty, like the Emby home screen.
 CONTINUE_ID = "continue"
 FAVORITES_ID = "favorites"
@@ -86,6 +91,15 @@ async def browse(device: EmbyServer, options: BrowseOptions) -> BrowseResults | 
 
     if media_id.startswith("summary_"):
         return await _browse_summary(device, media_id[8:], options)
+
+    if media_id.startswith("filters_"):
+        library_id, _, library_type = media_id[8:].partition(":")
+        return await _browse_filters(device, library_id, library_type)
+
+    if media_id.startswith("filter_"):
+        kind, _, rest = media_id[7:].partition("_")
+        library_id, _, library_type = rest.partition(":")
+        return await _browse_filter(device, kind, library_id, library_type, options)
 
     if media_id in (CONTINUE_ID, FAVORITES_ID):
         return await _browse_shortcut(device, media_id, options)
@@ -188,6 +202,12 @@ async def _browse_library(
     page, limit = _paging(options)
     start_index = (page - 1) * limit
     item_types = FLAT_LIBRARY_ITEM_TYPES.get(library_type, "")
+    # A flat library starts with the "Filtres" folder: the titles are shifted by one place.
+    shift = 1 if item_types and getattr(device.client, "_oppo_plugin", False) else 0
+    first_page_folder = shift and start_index == 0
+    start_index = max(0, start_index - shift)
+    if first_page_folder:
+        limit -= 1
     cached = None
     if item_types and library_cache.CACHE is not None:
         # The whole list is kept on the Remote: a page never waits for the server (see library_cache)
@@ -208,10 +228,17 @@ async def _browse_library(
         badges = await _badges_for(device, emby_items)
 
     items = []
+    if first_page_folder:
+        items.append(BrowseMediaItem(
+            title="Filtres", subtitle=" · ".join(FILTERS.values()), media_class=MediaClass.DIRECTORY,
+            media_type="filters", media_id=f"filters_{library_id}:{library_type}", can_browse=True,
+        ))
+        limit += 1
     for item in emby_items:
         media_item = _item_to_browse_item(device, item, badges.get(item.get("Id", "")))
         if media_item:
             items.append(media_item)
+    total += shift
 
     return BrowseResults(
         media=BrowseMediaItem(
@@ -295,10 +322,22 @@ async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOp
     badge = badges.get(item_id)
     poster = device.build_image_url(item_id) if "Primary" in item.get("ImageTags", {}) else None
 
+    disc = await device.client.get_oppo_format(item_id) or {}
+    # "Movie without menus", as in the web remote: a Blu-ray or UHD disc in one part; on a Dolby Vision disc only
+    # when the plugin plays a reduced disc (DLNA with the mod), since a plain file loses Dolby Vision.
+    main_movie = (
+        disc.get("Kind") in ("uhd", "bluray")
+        and (item.get("PartCount") or 1) <= 1
+        and (disc.get("MovieDisc") or (badge or {}).get("Hdr") != "DV")
+    )
+
     rows: list[BrowseMediaItem] = [
         BrowseMediaItem(title="▶ Lecture", media_class=MediaClass.MOVIE, media_type="play",
                         media_id=f"item_{item_id}", can_play=True, thumbnail=poster),
     ]
+    if main_movie:
+        rows.append(BrowseMediaItem(title="▶ Film sans menu", media_class=MediaClass.MOVIE, media_type="play",
+                                    media_id=f"movie_{item_id}", can_play=True, thumbnail=poster))
     position = (item.get("UserData") or {}).get("PlaybackPositionTicks") or 0
     if position > 0:
         rows.append(BrowseMediaItem(
@@ -306,9 +345,17 @@ async def _browse_title_page(device: EmbyServer, item_id: str, options: BrowseOp
             media_class=MediaClass.MOVIE, media_type="resume",
             media_id=f"resume_{item_id}_{position}", can_play=True, thumbnail=poster,
         ))
+        if main_movie:
+            rows.append(BrowseMediaItem(
+                title=f"⏯ Film sans menu à {_fmt_duration(position // TICKS_PER_SECOND)}",
+                media_class=MediaClass.MOVIE, media_type="resume",
+                media_id=f"movieat_{item_id}_{position}", can_play=True, thumbnail=poster,
+            ))
 
     details = [part for part in (
         _info_line(item, badge),
+        disc.get("Label") if disc.get("Kind") in DISC_KINDS else "",
+        _immersive_audio(item),
         ", ".join(item.get("Genres") or [])[:200],
         f"★ {item['CommunityRating']:.1f}" if item.get("CommunityRating") else "",
     ) if part]
@@ -399,6 +446,88 @@ async def _chapters_for(device: EmbyServer, item_id: str, item: dict | None = No
          device.client.chapter_image_url(item_id, i, c.get("ImageTag")) if c.get("ImageTag") else "")
         for i, c in enumerate(item.get("Chapters") or [])
     ]
+
+
+def _immersive_audio(item: dict) -> str:
+    """"Atmos" or "DTS:X" when a track has it. The Emby.Oppo plugin writes them into Emby's streams (profile
+    "TrueHD Atmos" / "DTS:X", title "Dolby Atmos"): Emby's own probe does not detect them."""
+    texts = [" ".join(str(s.get(k) or "") for k in ("Profile", "Title", "DisplayTitle"))
+             for s in item.get("MediaStreams") or [] if s.get("Type") == "Audio"]
+    if any("atmos" in t.lower() for t in texts):
+        return "Atmos"
+    if any("dts:x" in t.lower() or "dts-x" in t.lower() for t in texts):
+        return "DTS:X"
+    return ""
+
+
+async def _library_list(device: EmbyServer, library_id: str, library_type: str) -> dict[str, Any] | None:
+    """A flat library's whole list and badges: the copy kept on the Remote, downloaded first if needed."""
+    item_types = FLAT_LIBRARY_ITEM_TYPES.get(library_type, "")
+    if not item_types or library_cache.CACHE is None:
+        return None
+    key = library_cache.CACHE.key(device, library_id, item_types)
+    entry = library_cache.CACHE.get(key)
+    if entry is None:
+        entry = await library_cache.CACHE.fill(device, library_id, item_types)
+    elif library_cache.CACHE.stale(entry):
+        library_cache.CACHE.refresh_soon(device, library_id, item_types)
+    return entry
+
+
+async def _filter_items(device: EmbyServer, kind: str, entry: dict[str, Any]) -> list[dict]:
+    badges = entry.get("badges") or {}
+    items = entry.get("items") or []
+    if kind == "dv":
+        return [i for i in items if (badges.get(i.get("Id")) or {}).get("Hdr") == "DV"]
+    if kind == "4k":
+        return [i for i in items if (badges.get(i.get("Id")) or {}).get("Resolution") == "4K"]
+    ids = await device.client.get_oppo_audio_filter(kind)
+    return [i for i in items if i.get("Id") in ids] if ids else []
+
+
+async def _browse_filters(device: EmbyServer, library_id: str, library_type: str) -> BrowseResults | StatusCodes:
+    """The "Filtres" folder of a flat library: one folder per filter, with its count and a poster."""
+    entry = await _library_list(device, library_id, library_type)
+    if entry is None:
+        return StatusCodes.SERVICE_UNAVAILABLE
+    rows = []
+    for kind, label in FILTERS.items():
+        found = await _filter_items(device, kind, entry)
+        if not found:
+            continue
+        first = next((i for i in found if "Primary" in (i.get("ImageTags") or {})), None)
+        rows.append(BrowseMediaItem(
+            title=label, subtitle=f"{len(found)} titre{'s' if len(found) > 1 else ''}",
+            media_class=MediaClass.DIRECTORY, media_type="filter",
+            media_id=f"filter_{kind}_{library_id}:{library_type}", can_browse=True,
+            thumbnail=device.build_image_url(first["Id"]) if first else None,
+        ))
+    return BrowseResults(
+        media=BrowseMediaItem(title="Filtres", media_class=MediaClass.DIRECTORY, media_type="filters",
+                              media_id=f"filters_{library_id}:{library_type}", can_browse=True, items=rows),
+        pagination=Pagination(page=1, limit=len(rows), count=len(rows)),
+    )
+
+
+async def _browse_filter(
+    device: EmbyServer, kind: str, library_id: str, library_type: str, options: BrowseOptions
+) -> BrowseResults | StatusCodes:
+    """The titles of a library that match a filter, in the library's order."""
+    if kind not in FILTERS:
+        return StatusCodes.NOT_FOUND
+    entry = await _library_list(device, library_id, library_type)
+    if entry is None:
+        return StatusCodes.SERVICE_UNAVAILABLE
+    found = await _filter_items(device, kind, entry)
+    badges = entry.get("badges") or {}
+    page, limit = _paging(options)
+    start = (page - 1) * limit
+    rows = [r for r in (_item_to_browse_item(device, i, badges.get(i.get("Id", ""))) for i in found[start:start + limit]) if r]
+    return BrowseResults(
+        media=BrowseMediaItem(title=FILTERS[kind], media_class=MediaClass.DIRECTORY, media_type="filter",
+                              media_id=f"filter_{kind}_{library_id}:{library_type}", can_browse=True, items=rows),
+        pagination=Pagination(page=page, limit=limit, count=len(found)),
+    )
 
 
 def _chapter_name(name: str | None) -> str:

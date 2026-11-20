@@ -323,6 +323,16 @@ class EmbyMediaPlayer(MediaPlayerEntity):
             item_id, _, ticks = media_id.split("_", 1)[1].rpartition("_")
             if item_id and ticks.isdigit():
                 return await self._device.play_items(session_id, [item_id], start_ticks=int(ticks))
+        # "Movie without menus": "movie_<id>" or "movieat_<id>_<ticks>". The Emby.Oppo plugin is told first, then
+        # the title is played as usual; the plugin starts the disc's main movie directly.
+        if media_id.startswith(("movie_", "movieat_")):
+            rest = media_id.split("_", 1)[1]
+            item_id, ticks = rest.rpartition("_")[::2] if media_id.startswith("movieat_") else (rest, "0")
+            if item_id and ticks.isdigit():
+                if not await self._device.client.oppo_main_movie(item_id):
+                    _LOG.warning("[%s] the OPPO plugin did not accept 'movie without menus' for %s", self.id, item_id)
+                    return False
+                return await self._device.play_items(session_id, [item_id], start_ticks=int(ticks))
         if media_id.startswith("text_"):
             return True  # a summary line of a title page: nothing to play
         _LOG.warning("[%s] Unknown media_id format: %s", self.id, media_id)
